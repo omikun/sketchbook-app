@@ -168,3 +168,37 @@ fragment float4 brush_fragment(vxout fin [[ stage_in ]],
     brush.a *= fin.color.a;
     return brush;
 }
+
+// Editor rendering uses document units and immutable per-stroke stamp buffers.
+struct CanvasStamp { float2 position; float2 size; float4 color; };
+struct CanvasViewUniforms { float4 viewport; float4 canvas; };
+struct CanvasStampOut {
+    float4 position [[position]];
+    float2 local;
+    float2 documentPosition;
+    float4 color;
+};
+vertex CanvasStampOut canvas_stamp_vertex(const device CanvasStamp *stamps [[buffer(0)]],
+                                         constant CanvasViewUniforms &u [[buffer(1)]],
+                                         uint vertexID [[vertex_id]], uint instanceID [[instance_id]]) {
+    constexpr float2 corners[] = {float2(-0.5,-0.5), float2(0.5,-0.5), float2(0.5,0.5),
+                                  float2(-0.5,-0.5), float2(0.5,0.5), float2(-0.5,0.5)};
+    CanvasStamp stamp = stamps[instanceID];
+    float2 local = corners[vertexID];
+    float2 p = stamp.position + local * stamp.size;
+    float2 screen = (p - u.canvas.xy / 2) * u.viewport.z + u.viewport.xy / 2 + u.canvas.zw;
+    CanvasStampOut result;
+    result.position = float4(screen.x / u.viewport.x * 2 - 1, 1 - screen.y / u.viewport.y * 2, 0, 1);
+    result.local = local;
+    result.documentPosition = p;
+    result.color = stamp.color;
+    return result;
+}
+fragment float4 canvas_paper_fragment(CanvasStampOut in [[stage_in]]) { return float4(1); }
+fragment float4 canvas_ink_fragment(CanvasStampOut in [[stage_in]], constant CanvasViewUniforms &u [[buffer(1)]]) {
+    if (any(in.documentPosition < float2(0)) || any(in.documentPosition > u.canvas.xy)) discard_fragment();
+    float radius = length(in.local);
+    float edge = max(fwidth(radius), 0.001);
+    float alpha = in.color.a * (1 - smoothstep(0.5 - edge, 0.5, radius));
+    return float4(in.color.rgb * alpha, alpha);
+}

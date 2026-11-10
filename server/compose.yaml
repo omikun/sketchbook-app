@@ -1,0 +1,12 @@
+services:
+  canvas:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      CANVAS_TOKEN: ${CANVAS_TOKEN:?Set CANVAS_TOKEN in .env}
+    volumes:
+      - canvas-data:/data
+volumes:
+  canvas-data:
