@@ -14,7 +14,7 @@ private final class DrawingView: MTKView {
 }
 
 final class ViewController: UIViewController, UITableViewDataSource, UITableViewDelegate,
-                            UIGestureRecognizerDelegate, UIColorPickerViewControllerDelegate {
+                            UIGestureRecognizerDelegate {
     private let store = CanvasStore()
     private var canvas: DrawingView!
     private var renderer: CanvasRenderer!
@@ -24,20 +24,34 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
     private var activeTouch: UITouch?
     private var estimates: [NSNumber: (String, String, CanvasViewport)] = [:]
     private var color = UIColor(red: 0.12, green: 0.18, blue: 0.26, alpha: 1)
-    private var brushWidth = 16.0
+    private var activeTool: CanvasDrawingTool = .brush
+    private var brushSettings = CanvasToolSettings()
+    private var eraserSettings = CanvasToolSettings(width: 32)
+    private var currentSettings: CanvasToolSettings {
+        get { activeTool == .eraser ? eraserSettings : brushSettings }
+        set { if activeTool == .eraser { eraserSettings = newValue } else { brushSettings = newValue } }
+    }
+    private var brushWidth: Double { get { currentSettings.width } set { currentSettings.width = newValue } }
+    private var brushOpacity: Double { get { currentSettings.opacity } set { currentSettings.opacity = newValue } }
+    private var maxOpacity: Bool { get { currentSettings.maxOpacity } set { currentSettings.maxOpacity = newValue } }
+    private var opacityAtDragStart = 1.0
+    private var editingPaper = false
+    private var paperPreview: CanvasInk?
+    private var activeLine: CanvasStroke?
+    private var rulerHeld = false
+    private var rulerLocked = false
+    private var rulerDownTime: TimeInterval?
+    private var rulerUsedDuringHold = false
+    private var brushDynamics: CanvasBrushDynamics { get { currentSettings.dynamics } set { currentSettings.dynamics = newValue } }
     private var fingerDrawing = false
-    private let layerPanel = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
-    private let layerTable = UITableView(frame: .zero, style: .plain)
-    private let statusLabel = UILabel()
-    private let undoButton = UIButton(type: .system)
-    private let redoButton = UIButton(type: .system)
-    private let resizeButton = UIButton(type: .system)
-    private let colorButton = UIButton(type: .system)
-    private let fingerButton = UIButton(type: .system)
-    private let zoomButton = UIButton(type: .system)
-    private let sizeLabel = UILabel()
+    private let controls = CanvasEditorControls()
+    private var sizeAtDragStart = 16.0
     private var heartbeat: Timer?
     private var layerSignature = ""
+    private var renderedVersion: UInt64?
+    private var renderedViewport: CanvasViewport?
+    private var renderedLine: UUID?
+    private var renderedPaper: CanvasInk?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -52,6 +66,17 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
         do { renderer = try CanvasRenderer(device: device, format: canvas.colorPixelFormat) }
         catch { showUnavailable(error.localizedDescription); return }
         canvas.delegate = renderer
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "brushWidth") != nil { brushWidth = min(512, max(1, defaults.double(forKey: "brushWidth"))) }
+        if let data = defaults.data(forKey: "brushDynamics"), let value = try? JSONDecoder().decode(CanvasBrushDynamics.self, from: data), value.isValid { brushDynamics = value }
+        if defaults.object(forKey: "brushOpacity") != nil { brushOpacity = min(1, max(0, defaults.double(forKey: "brushOpacity"))) }
+        if defaults.object(forKey: "brushMaxOpacity") != nil { maxOpacity = defaults.bool(forKey: "brushMaxOpacity") }
+        fingerDrawing = defaults.bool(forKey: "fingerDrawing")
+        if let rgb = defaults.array(forKey: "brushColor") as? [Double], rgb.count == 3 {
+            color = UIColor(red: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
+        }
+        if let data = defaults.data(forKey: "eraserSettings"), let settings = try? JSONDecoder().decode(CanvasToolSettings.self, from: data), settings.isValid { eraserSettings = settings }
+        activeTool = CanvasDrawingTool(rawValue: defaults.string(forKey: "drawingTool") ?? "brush") ?? .brush
         configureLayout()
         configureInput()
         store.changed = { [weak self] in self?.refresh() }
@@ -65,70 +90,121 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
 
     deinit { heartbeat?.invalidate(); NotificationCenter.default.removeObserver(self) }
 
-    private func button(_ button: UIButton = UIButton(type: .system), symbol: String, label: String, action: Selector) -> UIButton {
-        button.setImage(UIImage(systemName: symbol), for: .normal)
-        button.accessibilityLabel = label
-        button.addTarget(self, action: action, for: .touchUpInside)
-        button.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        return button
-    }
     private func configureLayout() {
-        let topScroll = UIScrollView()
-        topScroll.showsHorizontalScrollIndicator = false
-        let top = UIStackView(arrangedSubviews: [
-            button(symbol: "person.2", label: "Connect to shared canvas", action: #selector(connectRoom)),
-            button(undoButton, symbol: "arrow.uturn.backward", label: "Undo my last stroke", action: #selector(undo)),
-            button(redoButton, symbol: "arrow.uturn.forward", label: "Redo my stroke", action: #selector(redo)),
-            button(zoomButton, symbol: "arrow.up.left.and.arrow.down.right", label: "Fit canvas to screen", action: #selector(fitCanvas)),
-            button(resizeButton, symbol: "crop", label: "Resize canvas", action: #selector(resizeCanvas)),
-            button(symbol: "square.3.layers.3d", label: "Show or hide layer window", action: #selector(toggleLayers))
+        for child in [canvas!, controls] {
+            child.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(child)
+            NSLayoutConstraint.activate([
+                child.leadingAnchor.constraint(equalTo: view.leadingAnchor), child.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                child.topAnchor.constraint(equalTo: view.topAnchor), child.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            ])
+        }
+        controls.configure(target: self, actions: [
+            .selectBrush: #selector(selectBrush), .selectEraser: #selector(selectEraser),
+            .toggleInterface: #selector(toggleInterface),
+            .pickColor: #selector(pickColor),
+            .toggleBrush: #selector(toggleBrush),
+            .undo: #selector(undo),
+            .redo: #selector(redo),
+            .toggleLayers: #selector(toggleLayers),
+            .toggleFinger: #selector(toggleFinger),
+            .fitCanvas: #selector(fitCanvas),
+            .resizeCanvas: #selector(resizeCanvas),
+            .connectRoom: #selector(connectRoom),
+            .dragBrushSize: #selector(dragBrushSize(_:)),
+            .addLayer: #selector(addLayer),
+            .changeSize: #selector(changeSize(_:)),
+            .toggleOpacity: #selector(toggleOpacity), .dragOpacity: #selector(dragOpacity(_:)),
+            .changeOpacity: #selector(changeOpacity(_:)), .pickBackground: #selector(pickBackground),
+            .rulerDown: #selector(rulerDown), .rulerUp: #selector(rulerUp), .rulerCancel: #selector(rulerCancel)
         ])
-        let tools = UIStackView()
-        tools.axis = .horizontal; tools.spacing = 8; tools.alignment = .center
-        tools.addArrangedSubview(button(colorButton, symbol: "circle.fill", label: "Choose brush color", action: #selector(pickColor)))
-        tools.addArrangedSubview(button(fingerButton, symbol: "hand.draw", label: "Toggle finger drawing", action: #selector(toggleFinger)))
-        sizeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        sizeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        let slider = UISlider(); slider.minimumValue = 1; slider.maximumValue = 128; slider.value = Float(brushWidth)
-        slider.accessibilityLabel = "Brush width in canvas pixels"
-        slider.addTarget(self, action: #selector(changeSize(_:)), for: .valueChanged)
-        tools.addArrangedSubview(slider); tools.addArrangedSubview(sizeLabel)
-        statusLabel.font = .preferredFont(forTextStyle: .caption1)
-        statusLabel.textColor = .secondaryLabel; statusLabel.numberOfLines = 2
-        statusLabel.accessibilityIdentifier = "canvasStatus"
-        for child in [topScroll, tools, canvas!, statusLabel, layerPanel] { child.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(child) }
-        top.translatesAutoresizingMaskIntoConstraints = false; topScroll.addSubview(top)
-        let safe = view.safeAreaLayoutGuide
-        NSLayoutConstraint.activate([
-            topScroll.topAnchor.constraint(equalTo: safe.topAnchor), topScroll.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
-            topScroll.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12), topScroll.heightAnchor.constraint(equalToConstant: 48),
-            top.topAnchor.constraint(equalTo: topScroll.contentLayoutGuide.topAnchor), top.bottomAnchor.constraint(equalTo: topScroll.contentLayoutGuide.bottomAnchor),
-            top.leadingAnchor.constraint(equalTo: topScroll.contentLayoutGuide.leadingAnchor), top.trailingAnchor.constraint(equalTo: topScroll.contentLayoutGuide.trailingAnchor),
-            top.heightAnchor.constraint(equalTo: topScroll.frameLayoutGuide.heightAnchor),
-            tools.topAnchor.constraint(equalTo: topScroll.bottomAnchor), tools.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
-            tools.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12), tools.heightAnchor.constraint(equalToConstant: 48),
-            canvas.topAnchor.constraint(equalTo: tools.bottomAnchor), canvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor), canvas.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -6),
-            statusLabel.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16), statusLabel.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
-            statusLabel.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -6), statusLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
-            layerPanel.topAnchor.constraint(equalTo: canvas.topAnchor, constant: 12), layerPanel.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
-            layerPanel.widthAnchor.constraint(equalToConstant: 280), layerPanel.heightAnchor.constraint(equalTo: canvas.heightAnchor, multiplier: 0.55)
-        ])
-        layerPanel.layer.cornerRadius = 16; layerPanel.clipsToBounds = true
-        let title = UILabel(); title.text = "Layers"; title.font = .preferredFont(forTextStyle: .headline)
-        let add = button(symbol: "plus", label: "Add my layer", action: #selector(addLayer))
-        let header = UIStackView(arrangedSubviews: [title, add]); header.alignment = .center
-        let legend = UILabel(); legend.text = "Colored dot = drawing now"; legend.font = .preferredFont(forTextStyle: .caption2); legend.textColor = .secondaryLabel
-        layerTable.backgroundColor = .clear; layerTable.dataSource = self; layerTable.delegate = self
-        layerTable.rowHeight = 68; layerTable.register(UITableViewCell.self, forCellReuseIdentifier: "layer")
-        layerTable.accessibilityIdentifier = "layerWindow"
-        let content = UIStackView(arrangedSubviews: [header, legend, layerTable]); content.axis = .vertical; content.spacing = 4
-        content.translatesAutoresizingMaskIntoConstraints = false; layerPanel.contentView.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: layerPanel.contentView.leadingAnchor, constant: 12), content.trailingAnchor.constraint(equalTo: layerPanel.contentView.trailingAnchor, constant: -12),
-            content.topAnchor.constraint(equalTo: layerPanel.contentView.topAnchor, constant: 6), content.bottomAnchor.constraint(equalTo: layerPanel.contentView.bottomAnchor, constant: -8)
-        ])
+        controls.setTool(activeTool)
+        controls.brushPanel.setDynamics(brushDynamics)
+        controls.brushPanel.setMaxOpacity(maxOpacity)
+        controls.brushPanel.maxOpacityChanged = { [weak self] enabled in
+            guard let self else { return }; self.finishStroke(); self.maxOpacity = enabled; self.saveToolPreferences()
+        }
+        controls.brushPanel.changed = { [weak self] value in
+            guard let self else { return }; self.finishStroke(); self.brushDynamics = value; self.saveToolPreferences()
+        }
+        controls.colorPanel.changed = { [weak self] color in
+            guard let self else { return }
+            if self.editingPaper {
+                guard self.store.canResize else { return }
+                self.paperPreview = self.ink(from: color); self.refresh()
+            } else { self.color = color; self.saveToolPreferences(); self.refresh() }
+        }
+        controls.colorPanel.committed = { [weak self] in self?.commitPaper() }
+    }
+    private func showPanel(_ panel: UIView?, forceOpen: Bool = false) { finishStroke(); commitPaper(); controls.showPanel(panel, forceOpen: forceOpen) }
+    private func ink(from color: UIColor) -> CanvasInk {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return CanvasInk(red: r, green: g, blue: b, alpha: 1)
+    }
+    private func commitPaper() {
+        guard let preview = paperPreview else { return }
+        paperPreview = nil
+        if store.canResize && preview != store.document.paperColor {
+            store.submit(CanvasOperation(kind: "background", authorID: store.authorID, color: preview))
+            store.save()
+        }
+        refresh()
+    }
+    @objc private func toggleInterface() { finishStroke(); commitPaper(); rulerCancel(); controls.toggleInterface() }
+    @objc private func selectBrush() { selectTool(.brush) }
+    @objc private func selectEraser() { selectTool(.eraser) }
+    private func selectTool(_ tool: CanvasDrawingTool) {
+        finishStroke(); activeTool = tool
+        controls.setTool(tool); controls.brushPanel.setDynamics(brushDynamics); controls.brushPanel.setMaxOpacity(maxOpacity)
+        saveToolPreferences(); refresh()
+    }
+    @objc private func toggleBrush() {
+        let switching = controls.brushPanel.mode != .size
+        controls.setBrushMode(.size); showPanel(controls.brushPanel, forceOpen: switching)
+    }
+    @objc private func dragBrushSize(_ gesture: UIPanGestureRecognizer) {
+        if gesture.state == .began { finishStroke(); commitPaper(); sizeAtDragStart = brushWidth }
+        let delta = gesture.translation(in: view)
+        brushWidth = min(512, max(1, sizeAtDragStart + Double(delta.x - delta.y) * 0.5))
+        saveToolPreferences(); refresh()
+        controls.showAdjustment(gesture.state == .ended || gesture.state == .cancelled ? nil : "Size · \(Int(brushWidth)) px", near: controls.sizeButton)
+    }
+    @objc private func toggleOpacity() {
+        let switching = controls.brushPanel.mode != .opacity
+        controls.setBrushMode(.opacity); showPanel(controls.brushPanel, forceOpen: switching)
+    }
+    @objc private func dragOpacity(_ gesture: UIPanGestureRecognizer) {
+        if gesture.state == .began { finishStroke(); commitPaper(); opacityAtDragStart = brushOpacity }
+        let delta = gesture.translation(in: view)
+        brushOpacity = min(1, max(0, opacityAtDragStart + Double(delta.x - delta.y) / 200))
+        saveToolPreferences(); refresh()
+        controls.showAdjustment(gesture.state == .ended || gesture.state == .cancelled ? nil : "Opacity · \(Int(brushOpacity * 100))%", near: controls.opacityButton)
+    }
+    @objc private func changeOpacity(_ slider: UISlider) { finishStroke(); brushOpacity = Double(slider.value); saveToolPreferences(); refresh() }
+    @objc private func rulerDown() {
+        rulerDownTime = ProcessInfo.processInfo.systemUptime; rulerUsedDuringHold = false; rulerHeld = true; refresh()
+    }
+    @objc private func rulerUp() {
+        let quickTap = rulerDownTime.map { ProcessInfo.processInfo.systemUptime - $0 < 0.3 } ?? true
+        if quickTap && !rulerUsedDuringHold { rulerLocked.toggle() }
+        rulerCancel()
+    }
+    @objc private func rulerCancel() { rulerHeld = false; rulerDownTime = nil; refresh() }
+    private func canvasTouchCount(_ event: UIEvent?) -> Int {
+        event?.allTouches?.filter { $0.view === canvas && $0.phase != .ended && $0.phase != .cancelled }.count ?? 1
+    }
+    private func saveToolPreferences() {
+        let defaults = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(brushSettings.dynamics) { defaults.set(data, forKey: "brushDynamics") }
+        defaults.set(brushSettings.maxOpacity, forKey: "brushMaxOpacity")
+        defaults.set(brushSettings.opacity, forKey: "brushOpacity")
+        defaults.set(brushSettings.width, forKey: "brushWidth")
+        if let data = try? JSONEncoder().encode(eraserSettings) { defaults.set(data, forKey: "eraserSettings") }
+        defaults.set(activeTool.rawValue, forKey: "drawingTool")
+        defaults.set(fingerDrawing, forKey: "fingerDrawing")
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        defaults.set([Double(r), Double(g), Double(b)], forKey: "brushColor")
     }
 
     private func configureInput() {
@@ -154,17 +230,25 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
         return CanvasPoint(id: id, x: min(16384, max(-8192, p.0)), y: min(16384, max(-8192, p.1)), pressure: Double(pressure))
     }
     private func begin(_ touches: Set<UITouch>, event: UIEvent?) {
-        if let activeTouch, activeTouch.type == .direct, (event?.allTouches?.count ?? 0) > 1 { finishStroke(); return }
+        if let activeTouch, activeTouch.type == .direct, canvasTouchCount(event) > 1 { finishStroke(); return }
         guard activeTouch == nil, let touch = touches.first(where: { $0.type == .pencil || (fingerDrawing && $0.type == .direct) }),
-              touch.type == .pencil || (event?.allTouches?.count ?? 1) == 1,
+              touch.type == .pencil || canvasTouchCount(event) == 1,
               let layer = store.document.layers.first(where: { $0.id == selectedLayerID && $0.ownerID == store.authorID && $0.visible }) else { return }
         let sample = point(touch)
         guard (0...store.document.width).contains(sample.x), (0...store.document.height).contains(sample.y) else { return }
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let strokeColor = activeTool == .eraser ? CanvasInk(red: 0, green: 0, blue: 0, alpha: brushOpacity) : CanvasInk(red: r, green: g, blue: b, alpha: brushOpacity)
         let stroke = CanvasStroke(layerID: layer.id, authorID: store.authorID,
-                                  color: CanvasInk(red: r, green: g, blue: b, alpha: a), width: brushWidth, points: [sample])
+                                  color: strokeColor, width: brushWidth, dynamics: brushDynamics, maxOpacity: maxOpacity, tool: activeTool, points: [sample])
         activeStrokeID = stroke.id; activeTouch = touch
+        if rulerHeld || rulerLocked {
+            rulerUsedDuringHold = rulerHeld
+            var line = stroke
+            line.points.append(CanvasPoint(x: sample.x, y: sample.y, pressure: sample.pressure))
+            activeLine = line
+            store.activity(layerID: layer.id, drawing: true); refresh(); return
+        }
         if estimates.count > 4096 { estimates.removeAll() }
         if let index = touch.estimationUpdateIndex { estimates[index] = (stroke.id, sample.id, viewport) }
         store.submit(CanvasOperation(kind: "beginStroke", authorID: store.authorID, stroke: stroke))
@@ -172,6 +256,13 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
     }
     private func move(_ touches: Set<UITouch>, event: UIEvent?) {
         guard let touch = activeTouch, touches.contains(touch), let strokeID = activeStrokeID else { return }
+        if var line = activeLine, let origin = line.points.first, let end = line.points.last {
+            var endpoint = point(touch, id: end.id)
+            // Pencil force falls to zero on lift; keep the last in-contact line pressure.
+            if touch.phase == .ended || touch.phase == .cancelled { endpoint.pressure = end.pressure }
+            line.points[1] = CanvasStraightLine.endpoint(from: origin, to: endpoint)
+            line.invalidateGeometry(); activeLine = line; refresh(); return
+        }
         let samples = (event?.coalescedTouches(for: touch) ?? [touch]).map { touch -> CanvasPoint in
             let existing = touch.estimationUpdateIndex.flatMap { estimates[$0] }
             let sample = point(touch, id: existing?.0 == strokeID ? existing!.1 : UUID().uuidString)
@@ -190,30 +281,62 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
     private func finishStroke() {
         guard let strokeID = activeStrokeID else { return }
         activeTouch = nil; activeStrokeID = nil
+        if let line = activeLine {
+            activeLine = nil
+            store.submit(CanvasOperation(kind: "beginStroke", authorID: store.authorID, stroke: line))
+        }
         store.submit(CanvasOperation(kind: "endStroke", authorID: store.authorID, strokeID: strokeID))
         store.activity(layerID: selectedLayerID, drawing: false)
-        store.save()
+        store.saveEventually()
     }
-    @objc private func backgrounded() { finishStroke(); store.save() }
+    @objc private func backgrounded() { finishStroke(); commitPaper(); rulerCancel(); store.save() }
 
     private func refresh() {
         guard renderer != nil else { return }
         if !store.document.layers.contains(where: { $0.id == selectedLayerID && $0.ownerID == store.authorID }) {
             selectedLayerID = store.ownLayers.last?.id
         }
-        renderer.document = store.document; renderer.viewport = viewport; canvas.setNeedsDisplay()
-        undoButton.isEnabled = activeStrokeID == nil && store.document.undoTarget(for: store.authorID) != nil
-        redoButton.isEnabled = activeStrokeID == nil && store.document.redoTarget(for: store.authorID) != nil
-        resizeButton.isEnabled = store.canResize && activeStrokeID == nil
-        colorButton.tintColor = color; fingerButton.tintColor = fingerDrawing ? .systemBlue : .secondaryLabel
-        fingerButton.accessibilityValue = fingerDrawing ? "On" : "Off; use Apple Pencil"
-        sizeLabel.text = "\(Int(brushWidth)) px"
-        zoomButton.accessibilityValue = "\(Int(viewport.zoom * 100)) percent of fit"
-        statusLabel.text = "\(Int(store.document.width)) × \(Int(store.document.height)) · \(Int(viewport.zoom * 100))% · \(store.status)"
+        if renderedVersion != store.contentVersion || renderedViewport != viewport || renderedLine != activeLine?.renderVersion || renderedPaper != paperPreview {
+            var preview = store.document
+            if let paperPreview, store.canResize { preview.background = paperPreview }
+            if let activeLine { preview.strokes.append(activeLine) }
+            renderer.document = preview; renderer.viewport = viewport; canvas.setNeedsDisplay()
+            renderedVersion = store.contentVersion; renderedViewport = viewport
+            renderedLine = activeLine?.renderVersion; renderedPaper = paperPreview
+        }
+        controls.undoButton.isEnabled = activeStrokeID == nil && store.document.undoTarget(for: store.authorID) != nil
+        controls.redoButton.isEnabled = activeStrokeID == nil && store.document.redoTarget(for: store.authorID) != nil
+        controls.resizeButton.isEnabled = store.canResize && activeStrokeID == nil
+        controls.colorButton.tintColor = color
+        for (button, tool) in [(controls.brushToolButton, CanvasDrawingTool.brush), (controls.eraserToolButton, CanvasDrawingTool.eraser)] {
+            button.accessibilityValue = activeTool == tool ? "Selected" : "Not selected"
+            button.backgroundColor = activeTool == tool ? UIColor(red: 0.45, green: 0.36, blue: 0.78, alpha: 1) : UIColor(red: 0.18, green: 0.18, blue: 0.32, alpha: 0.94)
+        }
+        controls.opacityButton.accessibilityValue = "\(Int(brushOpacity * 100)) percent"
+        controls.opacityButton.tintColor = UIColor.white.withAlphaComponent(max(0.15, brushOpacity))
+        controls.brushPanel.opacityLabel.text = "\(activeTool == .eraser ? "Eraser opacity" : "Opacity") · \(Int(brushOpacity * 100))%"
+        controls.brushPanel.opacitySlider.value = Float(brushOpacity)
+        let paper = paperPreview ?? store.document.paperColor
+        controls.backgroundButton.tintColor = UIColor(red: paper.red, green: paper.green, blue: paper.blue, alpha: 1)
+        controls.backgroundButton.accessibilityValue = controls.colorPanel.colorDescription(controls.backgroundButton.tintColor)
+        controls.backgroundButton.isEnabled = store.canResize
+        controls.backgroundButton.accessibilityHint = store.canResize ? "Change the paper behind your strokes" : "Only the room host can change paper color"
+        controls.backgroundButton.alpha = store.canResize ? 1 : 0.35
+        controls.rulerButton.backgroundColor = rulerHeld || rulerLocked ? UIColor(red: 0.45, green: 0.36, blue: 0.78, alpha: 1) : UIColor(red: 0.18, green: 0.18, blue: 0.32, alpha: 0.94)
+        controls.rulerButton.accessibilityValue = rulerLocked ? "Locked" : (rulerHeld ? "Held" : "Off")
+        controls.fingerButton.backgroundColor = fingerDrawing ? UIColor(red: 0.38, green: 0.32, blue: 0.72, alpha: 1) : UIColor(red: 0.18, green: 0.18, blue: 0.32, alpha: 0.94)
+        controls.fingerButton.accessibilityValue = fingerDrawing ? "On" : "Off; use Apple Pencil"
+        controls.sizeLabel.text = "\(activeTool == .eraser ? "Eraser" : "Brush") · \(Int(brushWidth)) px"
+        controls.brushSlider.value = Float(brushWidth)
+        controls.sizeButton.accessibilityValue = "\(Int(brushWidth)) pixels"
+        controls.colorButton.accessibilityValue = controls.colorPanel.colorDescription(color)
+        for control in [controls.undoButton, controls.redoButton, controls.resizeButton] { control.alpha = control.isEnabled ? 1 : 0.35 }
+        controls.zoomButton.accessibilityValue = "\(Int(viewport.zoom * 100)) percent of fit"
+        controls.statusLabel.text = "\(Int(store.document.width)) × \(Int(store.document.height)) · \(Int(viewport.zoom * 100))% · \(store.status)"
         let signature = store.document.layers.map { layer in
             "\(layer.id):\(layer.visible):\(selectedLayerID == layer.id):\(store.activeArtists(on: layer.id).map(\.authorID).joined())"
         }.joined(separator: "|")
-        if signature != layerSignature { layerSignature = signature; layerTable.reloadData() }
+        if signature != layerSignature { layerSignature = signature; controls.layerTable.reloadData() }
     }
     private var displayedLayers: [CanvasLayer] { Array(store.document.layers.reversed()) }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { displayedLayers.count }
@@ -259,16 +382,25 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
     @objc private func undo() { finishStroke(); store.undo() }
     @objc private func redo() { finishStroke(); store.redo() }
     @objc private func addLayer() { finishStroke(); store.addLayer(); selectedLayerID = store.ownLayers.last?.id; refresh() }
-    @objc private func toggleLayers() { layerPanel.isHidden.toggle() }
+    @objc private func toggleLayers() { showPanel(controls.layerPanel) }
     @objc private func fitCanvas() { finishStroke(); viewport = CanvasViewport(); refresh() }
-    @objc private func toggleFinger() { finishStroke(); fingerDrawing.toggle(); refresh() }
-    @objc private func changeSize(_ slider: UISlider) { brushWidth = Double(slider.value); refresh() }
+    @objc private func toggleFinger() { finishStroke(); fingerDrawing.toggle(); saveToolPreferences(); refresh() }
+    @objc private func changeSize(_ slider: UISlider) { finishStroke(); brushWidth = Double(slider.value); saveToolPreferences(); refresh() }
     @objc private func pickColor() {
-        finishStroke()
-        let picker = UIColorPickerViewController(); picker.selectedColor = color; picker.supportsAlpha = false; picker.delegate = self
-        present(picker, animated: true)
+        commitPaper()
+        let switching = editingPaper; editingPaper = false
+        controls.colorPanel.setTitle("INK"); controls.colorPanel.setColor(color)
+        showPanel(controls.colorPanel, forceOpen: switching)
     }
-    func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) { color = viewController.selectedColor; refresh() }
+    @objc private func pickBackground() {
+        guard store.canResize else { return }
+        commitPaper()
+        let switching = !editingPaper; editingPaper = true
+        let paper = store.document.paperColor
+        controls.colorPanel.setTitle("PAPER")
+        controls.colorPanel.setColor(UIColor(red: paper.red, green: paper.green, blue: paper.blue, alpha: 1))
+        showPanel(controls.colorPanel, forceOpen: switching)
+    }
     @objc private func pinch(_ gesture: UIPinchGestureRecognizer) {
         guard activeTouch?.type != .pencil else { return }
         finishStroke()
@@ -283,7 +415,9 @@ final class ViewController: UIViewController, UITableViewDataSource, UITableView
         viewport.panX += delta.x; viewport.panY += delta.y
         gesture.setTranslation(.zero, in: canvas); refresh()
     }
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        gestureRecognizer.view === canvas && otherGestureRecognizer.view === canvas
+    }
 
     @objc private func resizeCanvas() {
         finishStroke()

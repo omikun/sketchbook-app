@@ -22,6 +22,10 @@
 		CB0000000000000000000000 /* CanvasDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000000; };
 		CB0000000000000000000001 /* CanvasStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000001; };
 		CB0000000000000000000002 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000002; };
+		CB0000000000000000000003 /* CanvasColorPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000003; };
+		CB0000000000000000000004 /* CanvasEditorControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000004; };
+		CB0000000000000000000005 /* CanvasBrushPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000005; };
+		CB0000000000000000000006 /* CanvasFloatingPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000006; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +47,10 @@
 		CA0000000000000000000000 /* CanvasDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasDocument.swift; sourceTree = "<group>"; };
 		CA0000000000000000000001 /* CanvasStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStore.swift; sourceTree = "<group>"; };
 		CA0000000000000000000002 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
+		CA0000000000000000000003 /* CanvasColorPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasColorPanel.swift; sourceTree = "<group>"; };
+		CA0000000000000000000004 /* CanvasEditorControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasEditorControls.swift; sourceTree = "<group>"; };
+		CA0000000000000000000005 /* CanvasBrushPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasBrushPanel.swift; sourceTree = "<group>"; };
+		CA0000000000000000000006 /* CanvasFloatingPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasFloatingPanel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +68,7 @@
 			isa = PBXGroup;
 			children = (
 				83697CD720F4E96400B4C2A6 /* sketchbook-app */,
+				CF0000000000000000000001,
 				83697CD620F4E96400B4C2A6 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -68,6 +77,7 @@
 			isa = PBXGroup;
 			children = (
 				83697CD520F4E96400B4C2A6 /* sketchbook-app.app */,
+				CF0000000000000000000003,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -78,6 +88,10 @@
 				83697CD820F4E96400B4C2A6 /* AppDelegate.swift */,
 				83697CDA20F4E96400B4C2A6 /* ViewController.swift */,
 				CA0000000000000000000002 /* CanvasRenderer.swift */,
+				CA0000000000000000000003 /* CanvasColorPanel.swift */,
+				CA0000000000000000000004 /* CanvasEditorControls.swift */,
+				CA0000000000000000000005 /* CanvasBrushPanel.swift */,
+				CA0000000000000000000006 /* CanvasFloatingPanel.swift */,
 				CA0000000000000000000001 /* CanvasStore.swift */,
 				CA0000000000000000000000 /* CanvasDocument.swift */,
 				3BBA05A92431CED800879BF0 /* Renderer.swift */,
@@ -145,6 +159,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				CF0000000000000000000006,
 				83697CD420F4E96400B4C2A6 /* sketchbook-app */,
 			);
 		};
@@ -177,6 +192,10 @@
 				3BBA05AB2431CED800879BF0 /* Renderer.swift in Sources */,
 				3BBA05AA2431CED800879BF0 /* Shaders.metal in Sources */,
 				CB0000000000000000000002 /* CanvasRenderer.swift in Sources */,
+				CB0000000000000000000003 /* CanvasColorPanel.swift in Sources */,
+				CB0000000000000000000004 /* CanvasEditorControls.swift in Sources */,
+				CB0000000000000000000005 /* CanvasBrushPanel.swift in Sources */,
+				CB0000000000000000000006 /* CanvasFloatingPanel.swift in Sources */,
 				CB0000000000000000000001 /* CanvasStore.swift in Sources */,
 				CB0000000000000000000000 /* CanvasDocument.swift in Sources */,
 				3B6447C6244FD3A000A02873 /* GraphicalElement.swift in Sources */,
@@ -379,6 +398,17 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+		CF0000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = tests/FloatingControlsUITests.swift; sourceTree = SOURCE_ROOT; };
+		CF0000000000000000000002 = { isa = PBXBuildFile; fileRef = CF0000000000000000000001; };
+		CF0000000000000000000003 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = FloatingControlsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF0000000000000000000004 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (CF0000000000000000000002,); runOnlyForDeploymentPostprocessing = 0; };
+		CF0000000000000000000005 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		CF0000000000000000000006 = { isa = PBXNativeTarget; buildConfigurationList = CF0000000000000000000009; buildPhases = (CF0000000000000000000004, CF0000000000000000000005,); buildRules = (); dependencies = (CF000000000000000000000B,); name = FloatingControlsUITests; productName = FloatingControlsUITests; productReference = CF0000000000000000000003; productType = "com.apple.product-type.bundle.ui-testing"; };
+		CF0000000000000000000009 = { isa = XCConfigurationList; buildConfigurations = (CF0000000000000000000007, CF0000000000000000000008,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		CF000000000000000000000A = { isa = PBXContainerItemProxy; containerPortal = 83697CCD20F4E96400B4C2A6; proxyType = 1; remoteGlobalIDString = 83697CD420F4E96400B4C2A6; remoteInfo = "sketchbook-app"; };
+		CF000000000000000000000B = { isa = PBXTargetDependency; target = 83697CD420F4E96400B4C2A6; targetProxy = CF000000000000000000000A; };
+		CF0000000000000000000007 = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = A868C4MAHF; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "com.xiajenny.sketchbook-app.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = "sketchbook-app"; }; name = Debug; };
+		CF0000000000000000000008 = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = A868C4MAHF; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "com.xiajenny.sketchbook-app.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = "sketchbook-app"; }; name = Release; };
 	};
 	rootObject = 83697CCD20F4E96400B4C2A6 /* Project object */;
 }

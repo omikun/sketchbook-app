@@ -4,7 +4,11 @@
 
 Keep stroke samples and operations as the authoritative document. Add disposable raster caches to reduce GPU work. Preserve per-author undo/redo, layer ordering, Pencil corrections, collaboration, independent viewports, and non-destructive canvas resizing.
 
-The current renderer caches an immutable `MTLBuffer` per stroke, but clears and rerasterizes all visible strokes on every requested redraw. It rebuilds the active stroke's entire stamp buffer when samples change. Presence/status callbacks request unnecessary redraws. No physical-iPad timing has been measured; the workload calculations below are not FPS benchmarks.
+The original renderer cached an immutable `MTLBuffer` per stroke, but clears and rerasterizes all visible strokes on every requested redraw. It rebuilt the active stroke's entire stamp buffer when samples changed. Presence/status callbacks requested unnecessary redraws. No physical-iPad timing has been measured; the workload calculations below are not FPS benchmarks.
+
+## Implemented on 2026-11-10
+
+See [DRAWING_PERFORMANCE.md](DRAWING_PERFORMANCE.md) for measured desktop before/after results and regression checks. The renderer now uses bounded viewport-resolution completed-prefix caches per layer and immutable append-only geometry chunks. Presence/tool updates do not dirty artwork, own-operation acknowledgements avoid replay when they match optimistic edits, and routine persistence runs off the input thread. This is a completed-prefix cache, not the sparse tile/checkpoint system proposed below. Cold load, viewport changes, older-stroke corrections and undo can still require replay; large collaborative documents still use full server snapshots.
 
 ## Workload: 1,000 strokes × 200 points × 1,000 document-pixel path length
 

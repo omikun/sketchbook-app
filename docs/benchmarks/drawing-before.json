@@ -1,0 +1,10 @@
+{
+  "completedStrokes": 500,
+  "cpuEncodeMeanMs": 5.626772926189005,
+  "finalInputPoints": 10001,
+  "gpuMeanMs": 31.73822708777152,
+  "inputBatchP95Ms": 1.2284166878089309,
+  "measuredFrames": 20,
+  "samplesPerCompletedStroke": 100,
+  "targetPixels": "512x512"
+}

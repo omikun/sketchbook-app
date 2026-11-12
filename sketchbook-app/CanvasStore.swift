@@ -7,7 +7,10 @@ import CryptoKit
     private let clientKey: String
     var authorName = "Me"
     private(set) var document = CanvasDocument()
-    private(set) var session = CanvasSession()
+    private var syncSession = CanvasSession()
+    var session: CanvasSession { isRoom ? syncSession : CanvasSession(confirmed: document) }
+    private(set) var contentVersion: UInt64 = 0
+    private let persistence = DispatchQueue(label: "sketchbook.persistence", qos: .utility)
     private(set) var status = "Saved on this iPad"
     private(set) var presences: [String: (CanvasPresence, Date)] = [:]
     var changed: (() -> Void)?
@@ -48,37 +51,50 @@ import CryptoKit
     private func loadSession() {
         do {
             if FileManager.default.fileExists(atPath: file.path) {
-                session = try JSONDecoder().decode(CanvasSession.self, from: Data(contentsOf: file))
-            } else { session = CanvasSession() }
-        } catch { status = "Could not open saved canvas"; session = CanvasSession() }
+                syncSession = try JSONDecoder().decode(CanvasSession.self, from: Data(contentsOf: file))
+            } else { syncSession = CanvasSession() }
+        } catch { status = "Could not open saved canvas"; syncSession = CanvasSession() }
         rebuild()
+        if !isRoom { syncSession = CanvasSession() }
     }
     func save() {
-        saveTask?.cancel()
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try JSONEncoder().encode(session).write(to: file, options: .atomic)
-        } catch { status = "Could not save: \(error.localizedDescription)"; changed?() }
+        saveTask?.cancel(); saveTask = nil
+        let snapshot = session, destination = file
+        do { try persistence.sync { try writeCanvasSession(snapshot, to: destination) } }
+        catch { status = "Could not save: \(error.localizedDescription)"; changed?() }
+    }
+    func saveEventually() {
+        saveTask?.cancel(); saveTask = nil
+        let snapshot = session, destination = file
+        persistence.async { [weak self] in
+            do { try writeCanvasSession(snapshot, to: destination) }
+            catch {
+                let detail = error.localizedDescription
+                Task { @MainActor [weak self] in self?.status = "Could not save: \(detail)"; self?.changed?() }
+            }
+        }
     }
     private func scheduleSave() {
-        saveTask?.cancel()
+        guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
-            self?.save()
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            self?.saveEventually()
         }
     }
     private func rebuild() {
-        document = session.confirmed
-        for op in session.pending { document.apply(op) }
+        contentVersion &+= 1
+        document = syncSession.confirmed
+        for op in syncSession.pending { document.apply(op) }
     }
     func submit(_ operation: CanvasOperation) {
         guard document.apply(operation) else { return }
+        contentVersion &+= 1
         if operation.kind == "beginStroke" { activeStrokeID = operation.stroke?.id }
         if operation.kind == "endStroke", operation.strokeID == activeStrokeID { activeStrokeID = nil }
         if isRoom {
-            session.pending.append(operation)
+            syncSession.pending.append(operation)
             if connected { enqueue(operationEnvelope(operation)) }
-        } else { session.confirmed = document }
+        }
         scheduleSave()
         changed?()
     }
@@ -151,7 +167,7 @@ import CryptoKit
         task.maximumMessageSize = 32 * 1024 * 1024
         socket = task; task.resume()
         enqueue(["type": "join", "room": room, "token": token, "clientKey": clientKey,
-                 "name": authorName, "pendingIDs": session.pending.map(\.id)])
+                 "name": authorName, "pendingIDs": syncSession.pending.map(\.id)])
         receiveTask = Task { [weak self] in
             do {
                 while !Task.isCancelled {
@@ -196,7 +212,7 @@ import CryptoKit
     }
     private func enqueue(_ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        // Durable edits remain in session.pending and are retried after a fresh snapshot.
+        // Durable edits remain in syncSession.pending and are retried after a fresh snapshot.
         guard outbound.count < 512 else { lostConnection(); return }
         outbound.append(data)
         guard !sending, let socket else { return }
@@ -221,12 +237,12 @@ import CryptoKit
         }
         switch type {
         case "snapshot":
-            session.confirmed = try decode(object["document"] ?? [:], as: CanvasDocument.self)
+            syncSession.confirmed = try decode(object["document"] ?? [:], as: CanvasDocument.self)
             let accepted = Set(object["acceptedPendingIDs"] as? [String] ?? [])
-            session.pending.removeAll { accepted.contains($0.id) }
+            syncSession.pending.removeAll { accepted.contains($0.id) }
             connected = true; retry = 0
             rebuild()
-            for op in session.pending { enqueue(operationEnvelope(op)) }
+            for op in syncSession.pending { enqueue(operationEnvelope(op)) }
             ensureLayer()
             // After an app restart, recover unfinished saved strokes into undoable strokes.
             // An ongoing touch in this process remains open through a transient reconnect.
@@ -237,20 +253,28 @@ import CryptoKit
         case "operation":
             let op = try decode(object["operation"] ?? [:], as: CanvasOperation.self)
             let revision = object["revision"] as? Int ?? 0
-            guard revision == session.confirmed.revision + 1 else { lostConnection(); return }
-            guard session.confirmed.apply(op) else { lostConnection(); return }
-            session.pending.removeAll { $0.id == op.id }
-            rebuild()
+            guard revision == syncSession.confirmed.revision + 1 else { lostConnection(); return }
+            let matchesOptimistic = syncSession.pending.first == op
+            let hadPending = !syncSession.pending.isEmpty
+            guard syncSession.confirmed.apply(op) else { lostConnection(); return }
+            syncSession.pending.removeAll { $0.id == op.id }
+            if matchesOptimistic {
+                // The visible document already contains this exact edit. Do not replay its history.
+            } else if !hadPending, document.apply(op) { contentVersion &+= 1 }
+            else { rebuild() }
         case "ack":
             // A retried operation already appears in the snapshot. No second application.
-            session.pending.removeAll { $0.id == object["id"] as? String }; rebuild()
+            let oldCount = syncSession.pending.count
+            syncSession.pending.removeAll { $0.id == object["id"] as? String }
+            if syncSession.pending.count != oldCount { rebuild() }
         case "presence":
             let presence = try decode(object["presence"] ?? [:], as: CanvasPresence.self)
             presences[presence.authorID] = (presence, Date())
+            changed?(); return
         case "error":
             let detail = object["message"] as? String ?? "The server rejected an edit."
             if let id = object["id"] as? String {
-                session.pending.removeAll { $0.id == id }; rebuild()
+                syncSession.pending.removeAll { $0.id == id }; rebuild()
             } else {
                 // Authentication/configuration errors require user action, not endless retries.
                 generation = UUID(); connected = false
@@ -260,7 +284,12 @@ import CryptoKit
             message?(detail)
         default: return
         }
-        if connected { status = session.pending.isEmpty ? "Connected · all edits synced" : "Connected · syncing \(session.pending.count) edits" }
+        if connected { status = syncSession.pending.isEmpty ? "Connected · all edits synced" : "Connected · syncing \(syncSession.pending.count) edits" }
         scheduleSave(); changed?()
     }
+}
+
+private func writeCanvasSession(_ snapshot: CanvasSession, to file: URL) throws {
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try JSONEncoder().encode(snapshot).write(to: file, options: .atomic)
 }

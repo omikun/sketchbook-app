@@ -194,11 +194,28 @@ vertex CanvasStampOut canvas_stamp_vertex(const device CanvasStamp *stamps [[buf
     result.color = stamp.color;
     return result;
 }
-fragment float4 canvas_paper_fragment(CanvasStampOut in [[stage_in]]) { return float4(1); }
+fragment float4 canvas_paper_fragment(CanvasStampOut in [[stage_in]]) { return in.color; }
 fragment float4 canvas_ink_fragment(CanvasStampOut in [[stage_in]], constant CanvasViewUniforms &u [[buffer(1)]]) {
     if (any(in.documentPosition < float2(0)) || any(in.documentPosition > u.canvas.xy)) discard_fragment();
     float radius = length(in.local);
     float edge = max(fwidth(radius), 0.001);
     float alpha = in.color.a * (1 - smoothstep(0.5 - edge, 0.5, radius));
     return float4(in.color.rgb * alpha, alpha);
+}
+
+// Resolve overlapping stamps with max(alpha) before compositing the stroke once.
+fragment float4 canvas_stroke_mask_fragment(CanvasStampOut in [[stage_in]], constant CanvasViewUniforms &u [[buffer(1)]]) {
+    if (any(in.documentPosition < float2(0)) || any(in.documentPosition > u.canvas.xy)) discard_fragment();
+    float radius = length(in.local);
+    float edge = max(fwidth(radius), 0.001);
+    float alpha = in.color.a * (1 - smoothstep(0.5 - edge, 0.5, radius));
+    return float4(alpha, 0, 0, 1);
+}
+fragment float4 canvas_stroke_composite_fragment(CanvasStampOut in [[stage_in]], texture2d<float, access::read> mask [[texture(0)]]) {
+    float alpha = mask.read(uint2(in.position.xy)).r;
+    return float4(in.color.rgb * alpha, alpha);
+}
+
+fragment float4 canvas_cached_layer_fragment(CanvasStampOut in [[stage_in]], texture2d<float, access::read> layer [[texture(0)]]) {
+    return layer.read(uint2(in.position.xy));
 }

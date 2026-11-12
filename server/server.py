@@ -37,6 +37,20 @@ def points_valid(points):
                     and number(p.get("pressure"), 0, 1) for p in points))
 
 
+def dynamics_valid(value):
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    for key in ("size", "opacity"):
+        curve = value.get(key)
+        if (not isinstance(curve, dict) or not number(curve.get("minimum"), 0, 1)
+                or not number(curve.get("maximum"), curve["minimum"], 1)
+                or not number(curve.get("exponent"), 0.2, 4)):
+            return False
+    return True
+
+
 def apply(document, op, author, name):
     """Validate before mutation. Canonicalize authors and never accept client visibility/history."""
     if not isinstance(op, dict) or not identifier(op.get("id")):
@@ -68,12 +82,23 @@ def apply(document, op, author, name):
                 or not identifier(candidate.get("id")) or candidate.get("authorID") != author
                 or any(x["id"] == candidate["id"] for x in document["strokes"])
                 or not number(candidate.get("width"), 0.5, 512)
+                or not dynamics_valid(candidate.get("dynamics"))
+                or (candidate.get("tool") is not None and candidate["tool"] not in ("brush", "eraser"))
+                or (candidate.get("maxOpacity") is not None and type(candidate["maxOpacity"]) is not bool)
                 or not isinstance(color, dict) or not all(number(color.get(c), 0, 1) for c in ("red", "green", "blue", "alpha"))
                 or not points_valid(candidate.get("points")) or len(document["strokes"]) >= 10000):
             raise ValueError("Invalid stroke, hidden/foreign layer, or document limit reached")
         canonical = dict(id=candidate["id"], layerID=target["id"], authorID=author,
                          color=color, width=candidate["width"], points=candidate["points"],
                          ended=False, visible=True, redoEligible=False, hiddenAt=0)
+        if candidate.get("tool") is not None:
+            canonical["tool"] = candidate["tool"]
+        if candidate.get("maxOpacity") is not None:
+            canonical["maxOpacity"] = candidate["maxOpacity"]
+        if candidate.get("dynamics") is not None:
+            canonical["dynamics"] = {key: {field: candidate["dynamics"][key][field]
+                                         for field in ("minimum", "maximum", "exponent")}
+                                     for key in ("size", "opacity")}
         for old in document["strokes"]:
             if old["authorID"] == author and not old["visible"]:
                 old["redoEligible"] = False
@@ -115,6 +140,14 @@ def apply(document, op, author, name):
         if not layer or layer["ownerID"] != author or type(op.get("visible")) is not bool:
             raise ValueError("You can change only your own layers")
         layer["visible"] = op["visible"]
+    elif kind == "background":
+        color = op.get("color")
+        if document["hostID"] != author:
+            raise ValueError("Only the room host can change the paper color")
+        if (not isinstance(color, dict) or color.get("alpha") != 1
+                or not all(number(color.get(c), 0, 1) for c in ("red", "green", "blue", "alpha"))):
+            raise ValueError("Invalid paper color")
+        document["background"] = op["color"] = {c: color[c] for c in ("red", "green", "blue", "alpha")}
     elif kind == "resize":
         if document["hostID"] != author:
             raise ValueError("Only the room host can resize the canvas")
